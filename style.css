@@ -215,6 +215,51 @@ body {
 .t-item h3 { color: var(--c1); }
 .t-item p { color: var(--muted); }
 
+/* 迷你遊戲 */
+.game-tip { text-align: center; color: var(--muted); margin: -30px 0 20px; }
+.game-hud {
+  display: flex;
+  justify-content: center;
+  gap: 24px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+  font-size: 1.1rem;
+}
+.game-hud b { color: var(--c1); }
+.game-box {
+  position: relative;
+  max-width: 600px;
+  margin: 0 auto;
+  border-radius: 20px;
+  overflow: hidden;
+  border: 2px solid var(--c2);
+  box-shadow: 0 0 40px rgba(177, 77, 255, 0.4);
+}
+#game {
+  display: block;
+  width: 100%;
+  height: auto;
+  background: radial-gradient(ellipse at bottom, #1b1440, #05060f);
+  cursor: none;
+  touch-action: none;
+}
+.game-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  text-align: center;
+  background: rgba(5, 6, 15, 0.75);
+  backdrop-filter: blur(4px);
+}
+.game-overlay.hidden { display: none; }
+.game-overlay h3 { font-size: 1.8rem; }
+.game-overlay p { color: var(--muted); }
+.game-overlay .btn { border: none; font-size: 1rem; cursor: pointer; font-family: inherit; animation: none; }
+
 .footer { text-align: center; padding: 40px 16px; color: var(--muted); border-top: 1px solid var(--border); }
 
 /* ===== 捲動出現效果 ===== */
