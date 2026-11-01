@@ -1,0 +1,993 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>方塊鬥技場</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0d0f14; }
+  body { display: flex; align-items: center; justify-content: center; }
+  canvas { max-width: 100vw; max-height: 100vh; background: #1b1f2a; box-shadow: 0 0 24px #000; }
+</style>
+</head>
+<body>
+<canvas id="game" width="960" height="600"></canvas>
+<script>
+"use strict";
+
+// ============================================================
+// CONFIG：所有可調整的數值都放在這裡
+// ============================================================
+const CONFIG = {
+  // 畫布與等角投影
+  TILE_W: 64,
+  TILE_H: 32,
+  OFFSET_X: 480,        // 世界原點 (0,0) 的螢幕 X
+  OFFSET_Y: 110,        // 世界原點 (0,0) 的螢幕 Y
+  ARENA: 12,            // 場地大小（格）
+  OBSTACLE_H: 40,       // 方塊高度（像素）
+
+  // 角色
+  FIGHTER_R: 0.3,       // 角色碰撞半徑（格）
+  HP_MAX: 100,
+  MOVE_SPEED: 3.2,      // 移動速度（格/秒）
+  KNOCK_DECAY: 8,       // 擊退速度的衰減速率
+  GRAVITY: 900,         // 被打中跳起時的重力（像素/秒²）
+  HIT_HOP: 160,         // 被打中跳起的初速（像素/秒）
+  INVULN_HIT: 0.3,      // 被打中後的無敵時間（秒）
+  FLASH_TIME: 0.1,      // 閃白時間（秒）
+  TRAIL_DELAY: 0.4,     // 延遲血條等待時間（秒）
+  TRAIL_SPEED: 40,      // 延遲血條下降速度（HP/秒）
+
+  // 普通攻擊
+  ATK_DMG: 8,
+  ATK_RANGE: 1.2,       // 攻擊距離（格）
+  ATK_ARC: 90,          // 扇形角度（度）
+  ATK_KNOCK: 0.5,       // 攻擊擊退距離（格）
+  ATK_CD: 0.4,
+
+  // 能量球
+  PROJ_DMG: 15,
+  PROJ_SPEED: 6,        // 格/秒
+  PROJ_R: 0.12,
+  PROJ_Z: 22,           // 投射物離地高度（像素）
+  SKILL_CD: 2,
+
+  // 衝刺
+  DASH_DIST: 2,         // 衝刺距離（格）
+  DASH_TIME: 0.2,       // 衝刺時間（秒）
+  DASH_CD: 1.5,
+
+  // 回合與特效
+  ROUND_TIME: 60,
+  WINS_NEEDED: 2,       // 三戰兩勝
+  ROUND_START_TIME: 1.8,
+  ROUND_END_TIME: 2.0,
+  SHAKE_TIME: 0.15,
+  SHAKE_AMP: 6,
+
+  // 電腦 AI 難度：反應時間（秒）、各種行動機率
+  DIFFICULTY: {
+    easy:   { reaction: [0.45, 0.7], attackChance: 0.5,  skillChance: 0.3, retreatChance: 0.25 },
+    normal: { reaction: [0.3, 0.55], attackChance: 0.75, skillChance: 0.5, retreatChance: 0.4 },
+  },
+};
+
+const TAU = Math.PI * 2;
+const FONT = "'Microsoft JhengHei','PingFang TC','Noto Sans TC',sans-serif";
+const COLORS = {
+  boxLight: '#e0b07a',  // 方塊頂面（最亮）
+  boxMid:   '#b07a4c',  // 右側面（中）
+  boxDark:  '#8a5d36',  // 左側面（最暗）
+  boxEdge:  '#3b2a1a',
+  tileA:    '#3d4d61',
+  tileB:    '#33414f',
+  tileEdge: '#2a3442',
+};
+
+// 方塊障礙物（左上角格座標，每個佔 1×1）
+const OBSTACLES = [
+  { x: 3, y: 2 }, { x: 7, y: 3 }, { x: 5, y: 5 }, { x: 2, y: 7 }, { x: 8, y: 8 },
+];
+
+// 按鍵對應（event.code）
+const CONTROLS = {
+  // P1：左鍵開槍（能量球）、右鍵近戰（普攻）、Q 衝刺
+  P1: { up: 'KeyW', down: 'KeyS', left: 'KeyA', right: 'KeyD', atk: 'Mouse2', skill: 'Mouse0', dash: 'KeyQ' },
+  P2: {
+    up: 'ArrowUp', down: 'ArrowDown', left: 'ArrowLeft', right: 'ArrowRight',
+    atk: ['Numpad1', 'Comma'], skill: ['Numpad2', 'Period'], dash: ['Numpad3', 'Slash'],
+  },
+};
+const GAME_KEYS = [
+  'KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyJ', 'KeyK', 'KeyL',
+  'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
+  'Numpad1', 'Numpad2', 'Numpad3', 'Comma', 'Period', 'Slash',
+  'KeyP', 'Escape', 'Enter', 'NumpadEnter',
+];
+
+// ============================================================
+// 工具函式
+// ============================================================
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const rand = (a, b) => a + Math.random() * (b - a);
+const unit = (x, y) => {
+  const l = Math.hypot(x, y);
+  return l > 1e-9 ? { x: x / l, y: y / l } : { x: 0, y: 0 };
+};
+// 兩向量夾角（度）
+function angleDeg(a, b) {
+  const ua = unit(a.x, a.y), ub = unit(b.x, b.y);
+  return Math.acos(clamp(ua.x * ub.x + ua.y * ub.y, -1, 1)) * 180 / Math.PI;
+}
+// 將 hex 顏色變亮（k > 1）或變暗（k < 1）
+function shade(hex, k) {
+  const n = parseInt(hex.slice(1), 16);
+  const c = v => Math.round(clamp(v * k, 0, 255));
+  return `rgb(${c((n >> 16) & 255)},${c((n >> 8) & 255)},${c(n & 255)})`;
+}
+
+// 世界座標 (x, y, z) → 螢幕座標（等角投影）
+function worldToScreen(x, y, z = 0) {
+  return {
+    x: (x - y) * CONFIG.TILE_W / 2 + CONFIG.OFFSET_X,
+    y: (x + y) * CONFIG.TILE_H / 2 - z + CONFIG.OFFSET_Y,
+  };
+}
+// 螢幕方向輸入 (ix, iy) → 世界方向（正規化）
+function screenInputToWorld(ix, iy) {
+  return unit(ix + iy, iy - ix);
+}
+// 世界方向 → 螢幕方向輸入（給 AI 用，和鍵盤輸入格式一致）
+function worldToScreenInput(u) {
+  return { ix: (u.x - u.y) / 2, iy: (u.x + u.y) / 2 };
+}
+// 在格子座標中是否位於方塊內
+function inObstacle(x, y) {
+  return OBSTACLES.some(o => x >= o.x && x < o.x + 1 && y >= o.y && y < o.y + 1);
+}
+function fillPoly(ctx, pts, fill, stroke) {
+  ctx.beginPath();
+  pts.forEach((p, i) => (i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)));
+  ctx.closePath();
+  ctx.fillStyle = fill;
+  ctx.fill();
+  if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = 1; ctx.stroke(); }
+}
+function drawShadow(ctx, p, rx, ry) {
+  ctx.beginPath();
+  ctx.ellipse(p.x, p.y, rx, ry, 0, 0, TAU);
+  ctx.fillStyle = 'rgba(0,0,0,0.35)';
+  ctx.fill();
+}
+
+// ============================================================
+// Input：鍵盤狀態管理
+// ============================================================
+const Input = {
+  down: new Set(),     // 目前按住的鍵
+  pressed: new Set(),  // 本幀剛按下的鍵（每幀結束後清空）
+  init() {
+    window.addEventListener('keydown', e => {
+      if (GAME_KEYS.includes(e.code)) e.preventDefault();
+      if (!e.repeat) this.pressed.add(e.code);
+      this.down.add(e.code);
+    });
+    window.addEventListener('keyup', e => this.down.delete(e.code));
+    // 滑鼠按鍵當作 'Mouse0'（左）、'Mouse2'（右）
+    window.addEventListener('mousedown', e => {
+      const c = 'Mouse' + e.button;
+      if (!this.down.has(c)) this.pressed.add(c);
+      this.down.add(c);
+    });
+    window.addEventListener('mouseup', e => this.down.delete('Mouse' + e.button));
+    window.addEventListener('contextmenu', e => e.preventDefault());  // 右鍵不要跳出選單
+    window.addEventListener('blur', () => this.down.clear());
+  },
+  isDown(code) { return this.down.has(code); },
+  wasPressed(code) { return this.pressed.has(code); },
+  endFrame() { this.pressed.clear(); },
+};
+const enterPressed = () => Input.wasPressed('Enter') || Input.wasPressed('NumpadEnter');
+
+// 把鍵盤轉成指令：{ ix, iy, atk, skill, dash, aim }，與 AI 輸出格式相同
+function keyboardCmd(map) {
+  const axis = (neg, pos) => (Input.isDown(pos) ? 1 : 0) - (Input.isDown(neg) ? 1 : 0);
+  const any = codes => [].concat(codes).some(c => Input.wasPressed(c));
+  return {
+    ix: axis(map.left, map.right),
+    iy: axis(map.up, map.down),
+    atk: any(map.atk),
+    skill: any(map.skill),
+    dash: any(map.dash),
+    aim: null,
+  };
+}
+
+// ============================================================
+// 特效類別：粒子、傷害數字、投射物
+// ============================================================
+class Particle {
+  constructor(x, y, color) {
+    const a = rand(0, TAU), s = rand(40, 120);
+    this.x = x; this.y = y;
+    this.vx = Math.cos(a) * s;
+    this.vy = Math.sin(a) * s - 60;
+    this.color = color;
+    this.size = rand(2, 5);
+    this.life = this.maxLife = rand(0.4, 0.7);
+  }
+  update(dt) {
+    this.x += this.vx * dt;
+    this.y += this.vy * dt;
+    this.vy += 300 * dt;
+    this.life -= dt;
+  }
+}
+
+class DamageText {
+  constructor(x, y, text) {
+    this.x = x; this.y = y; this.text = text;
+    this.life = this.maxLife = 0.8;
+  }
+  update(dt) {
+    this.y -= 40 * dt;
+    this.life -= dt;
+  }
+}
+
+class Projectile {
+  constructor(owner, x, y, dir) {
+    this.owner = owner;
+    this.x = x; this.y = y;
+    this.vx = dir.x * CONFIG.PROJ_SPEED;
+    this.vy = dir.y * CONFIG.PROJ_SPEED;
+    this.alive = true;
+  }
+}
+
+// ============================================================
+// Fighter 類別：位置、速度、HP、面向、冷卻、狀態
+// ============================================================
+class Fighter {
+  constructor(name, color) {
+    this.name = name;   // 'P1' 或 'P2'
+    this.color = color;
+    this.reset(0, 0, { x: 1, y: 0 });
+  }
+
+  // 回合開始時重置狀態
+  reset(x, y, facing) {
+    this.x = x; this.y = y;
+    this.z = 0; this.vz = 0;          // 高度與垂直速度（被打中時跳起）
+    this.hp = CONFIG.HP_MAX;
+    this.trailHp = CONFIG.HP_MAX;     // 延遲血條（殘影）
+    this.trailTimer = 0;
+    this.facing = facing;             // 面向（世界方向，已正規化）
+    this.cd = { atk: 0, skill: 0, dash: 0 };
+    this.dashTimer = 0;
+    this.dashDir = { x: 0, y: 0 };
+    this.invuln = 0;
+    this.flash = 0;
+    this.kx = 0; this.ky = 0;         // 擊退速度
+    this.atkFx = 0;                   // 攻擊扇形特效剩餘時間
+  }
+
+  // cmd 來自鍵盤或 AI，格式相同，Fighter 不需要知道是誰在操作
+  update(dt, cmd, game) {
+    // 冷卻與計時器
+    this.cd.atk = Math.max(0, this.cd.atk - dt);
+    this.cd.skill = Math.max(0, this.cd.skill - dt);
+    this.cd.dash = Math.max(0, this.cd.dash - dt);
+    this.invuln = Math.max(0, this.invuln - dt);
+    this.flash = Math.max(0, this.flash - dt);
+    this.atkFx = Math.max(0, this.atkFx - dt);
+
+    // 跳起（被打中時），陰影會留在地面
+    if (this.z > 0 || this.vz > 0) {
+      this.vz -= CONFIG.GRAVITY * dt;
+      this.z += this.vz * dt;
+      if (this.z <= 0) { this.z = 0; this.vz = 0; }
+    }
+
+    // 面向：瞄準優先，否則朝移動方向
+    if (cmd.aim && (cmd.aim.x || cmd.aim.y)) this.facing = unit(cmd.aim.x, cmd.aim.y);
+    const move = screenInputToWorld(cmd.ix, cmd.iy);
+    if (move.x || move.y) this.facing = move;
+
+    // 衝刺：往面向方向，期間無敵
+    if (cmd.dash && this.cd.dash <= 0 && this.dashTimer <= 0) {
+      this.dashTimer = CONFIG.DASH_TIME;
+      this.dashDir = { x: this.facing.x, y: this.facing.y };
+      this.cd.dash = CONFIG.DASH_CD;
+      this.invuln = Math.max(this.invuln, CONFIG.DASH_TIME);
+    }
+
+    // 移動速度：一般移動 / 衝刺中 + 擊退
+    let vx = move.x * CONFIG.MOVE_SPEED, vy = move.y * CONFIG.MOVE_SPEED;
+    if (this.dashTimer > 0) {
+      const sp = CONFIG.DASH_DIST / CONFIG.DASH_TIME;
+      vx = this.dashDir.x * sp;
+      vy = this.dashDir.y * sp;
+      this.dashTimer -= dt;
+    }
+    vx += this.kx; vy += this.ky;
+    const decay = Math.exp(-CONFIG.KNOCK_DECAY * dt);
+    this.kx *= decay; this.ky *= decay;
+    game.moveFighter(this, vx * dt, vy * dt);
+
+    // 普通攻擊
+    if (cmd.atk && this.cd.atk <= 0) {
+      this.cd.atk = CONFIG.ATK_CD;
+      this.atkFx = 0.15;
+      game.tryMelee(this);
+    }
+    // 能量球
+    if (cmd.skill && this.cd.skill <= 0) {
+      this.cd.skill = CONFIG.SKILL_CD;
+      game.spawnProjectile(this);
+    }
+  }
+}
+
+// ============================================================
+// AIController：簡單狀態機，輸出與鍵盤相同格式的指令
+// ============================================================
+class AIController {
+  constructor(level) {
+    this.cfg = CONFIG.DIFFICULTY[level];
+    this.timer = 0;
+    this.plan = { mode: 'chase' };
+  }
+
+  update(dt, self, foe) {
+    this.timer -= dt;
+    if (this.timer <= 0) {
+      // 每 0.3–0.6 秒（依難度）才重新決策一次，加上隨機性
+      this.timer = rand(this.cfg.reaction[0], this.cfg.reaction[1]);
+      this.plan = this.makePlan(self, foe);
+    }
+    return this.buildCmd(self, foe);
+  }
+
+  makePlan(self, foe) {
+    const dx = foe.x - self.x, dy = foe.y - self.y;
+    const dist = Math.hypot(dx, dy);
+
+    // 血量低於 30%：有機率撤退，並可能衝刺閃避
+    if (self.hp < CONFIG.HP_MAX * 0.3 && Math.random() < this.cfg.retreatChance) {
+      return { mode: 'retreat', side: Math.random() < 0.5 ? 1 : -1, dash: Math.random() < 0.4 };
+    }
+
+    // 玩家位於 8 個方向之一的 ±15° 內：發射能量球
+    const ang = Math.atan2(dy, dx);
+    const step = Math.PI / 4;
+    const snap = Math.round(ang / step) * step;
+    const off = Math.abs(Math.atan2(Math.sin(ang - snap), Math.cos(ang - snap)));
+    if (off <= Math.PI / 12 && Math.random() < this.cfg.skillChance) {
+      return { mode: 'aim', aim: { x: Math.cos(snap), y: Math.sin(snap) }, skill: true };
+    }
+
+    if (dist > 1.4) return { mode: 'chase' };
+    if (Math.random() < this.cfg.attackChance) return { mode: 'attack', atk: true };
+    return { mode: 'chase' };
+  }
+
+  buildCmd(self, foe) {
+    const p = this.plan;
+    const u = unit(foe.x - self.x, foe.y - self.y);
+    const cmd = { ix: 0, iy: 0, atk: false, skill: false, dash: false, aim: null };
+
+    if (p.mode === 'chase') {
+      Object.assign(cmd, worldToScreenInput(u));
+    } else if (p.mode === 'retreat') {
+      // 背向玩家並稍微側移
+      const side = { x: -u.y * p.side, y: u.x * p.side };
+      const d = unit(-u.x * 0.8 + side.x * 0.6, -u.y * 0.8 + side.y * 0.6);
+      Object.assign(cmd, worldToScreenInput(d));
+      if (p.dash && self.cd.dash <= 0) { cmd.dash = true; p.dash = false; }
+    } else if (p.mode === 'attack') {
+      cmd.aim = u;
+      if (p.atk && self.cd.atk <= 0) { cmd.atk = true; p.atk = false; }
+    } else if (p.mode === 'aim') {
+      cmd.aim = p.aim;
+      if (p.skill && self.cd.skill <= 0) { cmd.skill = true; p.skill = false; }
+    }
+    return cmd;
+  }
+}
+
+// ============================================================
+// Game 狀態機：TITLE → ROUND_START → FIGHTING → ROUND_END → GAME_OVER
+// ============================================================
+class Game {
+  constructor(canvas) {
+    this.ctx = canvas.getContext('2d');
+    this.W = canvas.width;
+    this.H = canvas.height;
+
+    this.state = 'TITLE';
+    this.stateTime = 0;
+    this.mode = 'single';        // single：P1 vs 電腦；double：同一鍵盤
+    this.difficulty = 'normal';  // easy / normal
+    this.menuRow = 0;            // 標題畫面目前選的列
+    this.paused = false;
+
+    this.p1 = new Fighter('P1', '#4da3ff');
+    this.p2 = new Fighter('P2', '#ff6b6b');
+    this.fighters = [this.p1, this.p2];
+    this.ai = null;
+
+    this.projectiles = [];
+    this.particles = [];
+    this.texts = [];
+    this.wins = { P1: 0, P2: 0 };
+    this.round = 0;
+    this.timeLeft = CONFIG.ROUND_TIME;
+    this.banner = { main: '', sub: '' };
+    this.shakeTime = 0;
+  }
+
+  setState(s) {
+    this.state = s;
+    this.stateTime = 0;
+  }
+
+  label(f) {
+    if (f.name === 'P1') return this.mode === 'single' ? '玩家' : 'P1';
+    return this.mode === 'single' ? '電腦' : 'P2';
+  }
+
+  foeOf(f) { return f === this.p1 ? this.p2 : this.p1; }
+
+  // ---------- 流程 ----------
+  startMatch() {
+    this.wins = { P1: 0, P2: 0 };
+    this.round = 0;
+    this.paused = false;
+    this.startRound();
+  }
+
+  startRound() {
+    this.round++;
+    // 雙方面對面，P1 在左下、P2 在右上
+    this.p1.reset(1.5, 10.5, unit(9, -9));
+    this.p2.reset(10.5, 1.5, unit(-9, 9));
+    this.projectiles = [];
+    this.particles = [];
+    this.texts = [];
+    this.timeLeft = CONFIG.ROUND_TIME;
+    this.ai = this.mode === 'single' ? new AIController(this.difficulty) : null;
+    this.setState('ROUND_START');
+  }
+
+  endRound() {
+    const { p1, p2 } = this;
+    let main, sub = '';
+    if (p1.hp <= 0 && p2.hp <= 0) {
+      main = 'DRAW';
+      sub = '雙方同時倒下，本回合重來';
+    } else if (p1.hp <= 0 || p2.hp <= 0) {
+      const w = p1.hp > 0 ? p1 : p2;
+      this.wins[w.name]++;
+      main = 'K.O.!';
+      sub = `${this.label(w)} 獲得本回合`;
+    } else {
+      main = 'TIME UP';
+      if (p1.hp === p2.hp) {
+        sub = '血量相同，平手';
+      } else {
+        const w = p1.hp > p2.hp ? p1 : p2;
+        this.wins[w.name]++;
+        sub = `${this.label(w)} 血量較多`;
+      }
+    }
+    this.banner = { main, sub };
+    this.setState('ROUND_END');
+  }
+
+  // ---------- 主更新 ----------
+  update(dt) {
+    this.stateTime += dt;
+    if (this.state === 'TITLE') {
+      this.updateTitle();
+    } else if (this.state === 'GAME_OVER') {
+      if (enterPressed()) this.setState('TITLE');
+    } else {
+      this.updateMatch(dt);
+    }
+  }
+
+  updateTitle() {
+    if (Input.wasPressed('ArrowUp') || Input.wasPressed('ArrowDown')) {
+      this.menuRow = 1 - this.menuRow;
+    }
+    const dir = (Input.wasPressed('ArrowRight') ? 1 : 0) - (Input.wasPressed('ArrowLeft') ? 1 : 0);
+    if (dir !== 0) {
+      if (this.menuRow === 0) this.mode = this.mode === 'single' ? 'double' : 'single';
+      else this.difficulty = this.difficulty === 'easy' ? 'normal' : 'easy';
+    }
+    if (enterPressed()) this.startMatch();
+  }
+
+  updateMatch(dt) {
+    // 暫停：P 或 Esc（只在對戰中）
+    if (this.state === 'FIGHTING' && (Input.wasPressed('KeyP') || Input.wasPressed('Escape'))) {
+      this.paused = !this.paused;
+    }
+    if (this.paused) return;
+
+    this.updateEffects(dt);
+
+    if (this.state === 'ROUND_START') {
+      if (this.stateTime >= CONFIG.ROUND_START_TIME) this.setState('FIGHTING');
+    } else if (this.state === 'FIGHTING') {
+      this.updateFighting(dt);
+    } else if (this.state === 'ROUND_END') {
+      if (this.stateTime >= CONFIG.ROUND_END_TIME) {
+        if (this.wins.P1 >= CONFIG.WINS_NEEDED || this.wins.P2 >= CONFIG.WINS_NEEDED) {
+          this.setState('GAME_OVER');
+        } else {
+          this.startRound();
+        }
+      }
+    }
+  }
+
+  updateFighting(dt) {
+    this.timeLeft -= dt;
+    const [c1, c2] = this.getCommands(dt);
+    this.p1.update(dt, c1, this);
+    this.p2.update(dt, c2, this);
+    this.separateFighters();
+    this.updateProjectiles(dt);
+    if (this.p1.hp <= 0 || this.p2.hp <= 0 || this.timeLeft <= 0) this.endRound();
+  }
+
+  // 單人：P1 鍵盤、P2 電腦；雙人：P1、P2 都是鍵盤
+  getCommands(dt) {
+    const c1 = keyboardCmd(CONTROLS.P1);
+    const c2 = this.mode === 'double' ? keyboardCmd(CONTROLS.P2) : this.ai.update(dt, this.p2, this.p1);
+    return [c1, c2];
+  }
+
+  updateEffects(dt) {
+    this.particles.forEach(p => p.update(dt));
+    this.particles = this.particles.filter(p => p.life > 0);
+    this.texts.forEach(t => t.update(dt));
+    this.texts = this.texts.filter(t => t.life > 0);
+    this.shakeTime = Math.max(0, this.shakeTime - dt);
+    // 延遲血條：等一下再慢慢減少
+    for (const f of this.fighters) {
+      if (f.trailTimer > 0) f.trailTimer -= dt;
+      else if (f.trailHp > f.hp) f.trailHp = Math.max(f.hp, f.trailHp - CONFIG.TRAIL_SPEED * dt);
+      if (f.trailHp < f.hp) f.trailHp = f.hp;
+    }
+  }
+
+  // ---------- 移動與碰撞（世界座標） ----------
+  // 分段移動，避免高速時穿過方塊
+  moveFighter(f, dx, dy) {
+    const steps = Math.max(1, Math.ceil(Math.max(Math.abs(dx), Math.abs(dy)) / 0.1));
+    for (let i = 0; i < steps; i++) {
+      f.x += dx / steps; this.keepInside(f); resolveObstacles(f);
+      f.y += dy / steps; this.keepInside(f); resolveObstacles(f);
+    }
+  }
+
+  keepInside(f) {
+    const R = CONFIG.FIGHTER_R, A = CONFIG.ARENA;
+    f.x = clamp(f.x, R, A - R);
+    f.y = clamp(f.y, R, A - R);
+  }
+
+  // 兩名角色互相推開，不能重疊
+  separateFighters() {
+    const a = this.p1, b = this.p2;
+    const minD = CONFIG.FIGHTER_R * 2;
+    const dx = b.x - a.x, dy = b.y - a.y, d = Math.hypot(dx, dy);
+    if (d >= minD || d === 0) return;
+    const push = (minD - d) / 2;
+    a.x -= dx / d * push; a.y -= dy / d * push;
+    b.x += dx / d * push; b.y += dy / d * push;
+    for (const f of this.fighters) { this.keepInside(f); resolveObstacles(f); }
+  }
+
+  // ---------- 攻擊 ----------
+  // 普通攻擊：面前扇形範圍
+  tryMelee(att) {
+    const foe = this.foeOf(att);
+    const dx = foe.x - att.x, dy = foe.y - att.y;
+    const dist = Math.hypot(dx, dy);
+    if (dist > CONFIG.ATK_RANGE + CONFIG.FIGHTER_R) return;
+    if (angleDeg(att.facing, { x: dx, y: dy }) > CONFIG.ATK_ARC / 2) return;
+    const u = unit(dx, dy);
+    this.hurt(foe, CONFIG.ATK_DMG, u, CONFIG.ATK_KNOCK);
+  }
+
+  spawnProjectile(owner) {
+    const d = owner.facing;
+    this.projectiles.push(new Projectile(owner, owner.x + d.x * 0.5, owner.y + d.y * 0.5, d));
+  }
+
+  updateProjectiles(dt) {
+    for (const p of this.projectiles) {
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      // 撞到場地邊緣或方塊就消失
+      if (p.x < 0 || p.y < 0 || p.x > CONFIG.ARENA || p.y > CONFIG.ARENA || inObstacle(p.x, p.y)) {
+        p.alive = false;
+        this.burst(worldToScreen(p.x, p.y, 0), p.owner.color, 5);
+        continue;
+      }
+      // 擊中對手
+      const foe = this.foeOf(p.owner);
+      if (foe.hp > 0 && Math.hypot(p.x - foe.x, p.y - foe.y) < CONFIG.PROJ_R + CONFIG.FIGHTER_R) {
+        p.alive = false;
+        const sp = Math.hypot(p.vx, p.vy) || 1;
+        this.hurt(foe, CONFIG.PROJ_DMG, { x: p.vx / sp, y: p.vy / sp }, 0.4);
+      }
+    }
+    this.projectiles = this.projectiles.filter(p => p.alive);
+  }
+
+  // 受到傷害：扣血、無敵、閃白、擊退、跳起、傷害數字、震動、粒子
+  hurt(target, dmg, dir, knockDist) {
+    if (this.state !== 'FIGHTING' || target.hp <= 0 || target.invuln > 0) return;
+    target.hp = Math.max(0, target.hp - dmg);
+    target.trailTimer = CONFIG.TRAIL_DELAY;
+    target.invuln = CONFIG.INVULN_HIT;
+    target.flash = CONFIG.FLASH_TIME;
+    target.kx = dir.x * knockDist * CONFIG.KNOCK_DECAY;
+    target.ky = dir.y * knockDist * CONFIG.KNOCK_DECAY;
+    target.vz = CONFIG.HIT_HOP;
+
+    const s = worldToScreen(target.x, target.y, target.z + 20);
+    this.texts.push(new DamageText(s.x, s.y - 20, `-${dmg}`));
+    this.burst(s, target.color, 10);
+    this.shakeTime = CONFIG.SHAKE_TIME;
+  }
+
+  burst(pos, color, n) {
+    for (let i = 0; i < n; i++) this.particles.push(new Particle(pos.x, pos.y, color));
+  }
+
+  // ---------- 繪圖 ----------
+  render() {
+    const ctx = this.ctx;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = '#1b1f2a';
+    ctx.fillRect(0, 0, this.W, this.H);
+
+    if (this.state === 'TITLE') { this.drawTitle(); return; }
+
+    ctx.save();
+    if (this.shakeTime > 0) {
+      const a = CONFIG.SHAKE_AMP * (this.shakeTime / CONFIG.SHAKE_TIME);
+      ctx.translate(rand(-a, a), rand(-a, a));
+    }
+    this.drawArena();
+    this.drawSortedObjects();
+    this.drawEffects();
+    ctx.restore();
+
+    this.drawHud();
+    this.drawOverlay();
+  }
+
+  // 地板（棋盤格）與陰影（陰影永遠畫在地面上）
+  drawArena() {
+    const ctx = this.ctx, A = CONFIG.ARENA;
+    for (let i = 0; i < A; i++) {
+      for (let j = 0; j < A; j++) {
+        const pts = [
+          worldToScreen(i, j), worldToScreen(i + 1, j),
+          worldToScreen(i + 1, j + 1), worldToScreen(i, j + 1),
+        ];
+        fillPoly(ctx, pts, (i + j) % 2 === 0 ? COLORS.tileA : COLORS.tileB, COLORS.tileEdge);
+      }
+    }
+    for (const f of this.fighters) drawShadow(ctx, worldToScreen(f.x, f.y, 0), 14, 7);
+    for (const p of this.projectiles) drawShadow(ctx, worldToScreen(p.x, p.y, 0), 6, 3);
+  }
+
+  // 深度排序：依 (x + y) 由小到大畫，後面的物件會蓋住前面的
+  drawSortedObjects() {
+    const items = [];
+    for (const o of OBSTACLES) items.push({ key: o.x + o.y + 1, draw: () => this.drawBox(o) });
+    for (const f of this.fighters) items.push({ key: f.x + f.y, draw: () => this.drawFighter(f) });
+    for (const p of this.projectiles) items.push({ key: p.x + p.y, draw: () => this.drawProjectile(p) });
+    items.sort((a, b) => a.key - b.key);
+    for (const it of items) it.draw();
+  }
+
+  // 方塊：頂面（亮）、右側面（中）、左側面（暗）
+  drawBox(o) {
+    const ctx = this.ctx, x = o.x, y = o.y, H = CONFIG.OBSTACLE_H;
+    const P = (wx, wy, z) => worldToScreen(wx, wy, z);
+    fillPoly(ctx, [P(x + 1, y, 0), P(x + 1, y + 1, 0), P(x + 1, y + 1, H), P(x + 1, y, H)], COLORS.boxMid, COLORS.boxEdge);
+    fillPoly(ctx, [P(x, y + 1, 0), P(x + 1, y + 1, 0), P(x + 1, y + 1, H), P(x, y + 1, H)], COLORS.boxDark, COLORS.boxEdge);
+    fillPoly(ctx, [P(x, y, H), P(x + 1, y, H), P(x + 1, y + 1, H), P(x, y + 1, H)], COLORS.boxLight, COLORS.boxEdge);
+  }
+
+  // 角色：身體 + 頭，腳下陰影留在地面
+  drawFighter(f) {
+    const ctx = this.ctx;
+    const g = worldToScreen(f.x, f.y, 0);   // 腳下位置
+    const flash = f.flash > 0;
+    const bodyBottom = g.y - f.z;
+    const bodyTop = bodyBottom - 24;
+    const headX = g.x, headY = bodyTop - 9;
+
+    ctx.save();
+    if (f.dashTimer > 0) ctx.globalAlpha = 0.55;
+    if (f.atkFx > 0) this.drawAttackArc(f);
+
+    // 身體（正面淺色、側面暗色）
+    ctx.fillStyle = flash ? '#ffffff' : f.color;
+    ctx.fillRect(g.x - 8, bodyTop, 16, 24);
+    ctx.fillStyle = flash ? '#dddddd' : shade(f.color, 0.65);
+    ctx.fillRect(g.x + 4, bodyTop, 4, 24);
+
+    // 頭
+    ctx.beginPath();
+    ctx.arc(headX, headY, 9, 0, TAU);
+    ctx.fillStyle = flash ? '#ffffff' : '#ffe0bd';
+    ctx.fill();
+
+    // 面向標記：頭部邊緣的小白點
+    const fx = f.facing.x - f.facing.y, fy = (f.facing.x + f.facing.y) / 2;
+    const fl = Math.hypot(fx, fy) || 1;
+    ctx.beginPath();
+    ctx.arc(headX + fx / fl * 6, headY + fy / fl * 6, 2, 0, TAU);
+    ctx.fillStyle = '#222';
+    ctx.fill();
+
+    // 手槍：握在身體側邊，槍口朝面向方向
+    const sdx = f.facing.x - f.facing.y, sdy = (f.facing.x + f.facing.y) / 2;
+    const sl = Math.hypot(sdx, sdy) || 1;
+    this.drawPistol(f, g.x + sdx / sl * 7, bodyTop + 13 + sdy / sl * 7);
+
+    // 頭上的冷卻圓環：攻擊（內）、能量球（中）、衝刺（外）
+    const rings = [
+      { key: 'atk', r: 15, max: CONFIG.ATK_CD, color: '#ffd166' },
+      { key: 'skill', r: 19, max: CONFIG.SKILL_CD, color: '#06d6a0' },
+      { key: 'dash', r: 23, max: CONFIG.DASH_CD, color: '#f78c6b' },
+    ];
+    for (const rg of rings) {
+      const ready = 1 - clamp(f.cd[rg.key] / rg.max, 0, 1);
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(headX, headY, rg.r, 0, TAU);
+      ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(headX, headY, rg.r, -Math.PI / 2, -Math.PI / 2 + ready * TAU);
+      ctx.strokeStyle = rg.color;
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  // 手槍（側視）：套筒、槍口、握把、扳機護圈與握持的手
+  // (hx, hy) 為槍的握點（螢幕座標），槍口朝螢幕上的面向方向
+  drawPistol(f, hx, hy) {
+    const ctx = this.ctx;
+    const sx = f.facing.x - f.facing.y, sy = (f.facing.x + f.facing.y) / 2;
+    const len = Math.hypot(sx, sy) || 1;
+    const ang = Math.atan2(sy / len, sx / len);
+
+    ctx.save();
+    ctx.translate(hx, hy);
+    // 槍口朝左時，先上下翻轉再旋轉，避免槍身倒立
+    if (Math.abs(ang) > Math.PI / 2) ctx.scale(1, -1);
+    ctx.rotate(ang);
+
+    ctx.fillStyle = '#3a3f47';          // 套筒
+    ctx.fillRect(0, -3, 14, 4);
+    ctx.fillStyle = '#8a919c';          // 套筒高光
+    ctx.fillRect(1, -3, 12, 1);
+    ctx.fillStyle = '#1e2126';          // 槍口
+    ctx.fillRect(13, -2, 2, 2);
+    ctx.fillStyle = '#6b4226';          // 握把（往下）
+    ctx.fillRect(2, 1, 4, 7);
+    ctx.strokeStyle = '#3a3f47';        // 扳機護圈
+    ctx.lineWidth = 1;
+    ctx.strokeRect(6.5, 1, 3, 3);
+    ctx.beginPath();                    // 握持的手
+    ctx.arc(4, 5, 2, 0, TAU);
+    ctx.fillStyle = '#ffe0bd';
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // 普通攻擊的扇形特效
+  drawAttackArc(f) {
+    const R = CONFIG.ATK_RANGE, half = (CONFIG.ATK_ARC / 2) * Math.PI / 180;
+    const base = Math.atan2(f.facing.y, f.facing.x);
+    const pts = [worldToScreen(f.x, f.y, 0)];
+    for (let i = 0; i <= 12; i++) {
+      const a = base - half + (2 * half) * i / 12;
+      pts.push(worldToScreen(f.x + Math.cos(a) * R, f.y + Math.sin(a) * R, 0));
+    }
+    fillPoly(this.ctx, pts, 'rgba(255,255,255,0.3)');
+  }
+
+  drawProjectile(p) {
+    const ctx = this.ctx;
+    const s = worldToScreen(p.x, p.y, CONFIG.PROJ_Z);
+    ctx.save();
+    ctx.shadowColor = p.owner.color;
+    ctx.shadowBlur = 14;
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, 7, 0, TAU);
+    ctx.fillStyle = '#ffffff';
+    ctx.fill();
+    ctx.restore();
+  }
+
+  drawEffects() {
+    const ctx = this.ctx;
+    for (const p of this.particles) {
+      ctx.globalAlpha = Math.max(0, p.life / p.maxLife);
+      ctx.fillStyle = p.color;
+      ctx.fillRect(p.x, p.y, p.size, p.size);
+    }
+    ctx.globalAlpha = 1;
+    ctx.font = `bold 20px ${FONT}`;
+    ctx.textAlign = 'center';
+    for (const t of this.texts) {
+      ctx.globalAlpha = Math.max(0, t.life / t.maxLife);
+      ctx.lineWidth = 4;
+      ctx.strokeStyle = '#000';
+      ctx.strokeText(t.text, t.x, t.y);
+      ctx.fillStyle = '#ffd166';
+      ctx.fillText(t.text, t.x, t.y);
+    }
+    ctx.globalAlpha = 1;
+    ctx.textAlign = 'left';
+  }
+
+  // 左上 P1、右上 P2 血條（含延遲殘影），中上倒數與比分
+  drawHud() {
+    const ctx = this.ctx;
+    this.drawBar(this.p1, 30, 30, 340, false);
+    this.drawBar(this.p2, 590, 30, 340, true);
+
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#ffffff';
+    ctx.font = `bold 36px ${FONT}`;
+    ctx.fillText(String(Math.max(0, Math.ceil(this.timeLeft))), this.W / 2, 46);
+    ctx.font = `bold 18px ${FONT}`;
+    ctx.fillText(`${this.wins.P1}  -  ${this.wins.P2}`, this.W / 2, 74);
+    ctx.textAlign = 'left';
+  }
+
+  drawBar(f, x, y, w, rightAlign) {
+    const ctx = this.ctx, h = 18;
+    const frac = clamp(f.hp / CONFIG.HP_MAX, 0, 1);
+    const trail = clamp(f.trailHp / CONFIG.HP_MAX, 0, 1);
+    const fillX = (fw) => (rightAlign ? x + w - fw : x);
+
+    ctx.fillStyle = '#333';
+    ctx.fillRect(x, y, w, h);
+    ctx.fillStyle = '#ffd166';
+    ctx.fillRect(fillX(w * trail), y, w * trail, h);
+    ctx.fillStyle = f.color;
+    ctx.fillRect(fillX(w * frac), y, w * frac, h);
+    ctx.strokeStyle = '#ffffff';
+    ctx.strokeRect(x, y, w, h);
+
+    ctx.fillStyle = '#ffffff';
+    ctx.font = `bold 16px ${FONT}`;
+    ctx.fillText(`${this.label(f)}  ${Math.ceil(f.hp)}`, x, y - 6);
+  }
+
+  // 暫停、回合提示、結算
+  drawOverlay() {
+    const ctx = this.ctx;
+    if (this.paused) {
+      ctx.fillStyle = 'rgba(0,0,0,0.5)';
+      ctx.fillRect(0, 0, this.W, this.H);
+      this.drawBanner('暫停', 'P / Esc 繼續');
+      return;
+    }
+    if (this.state === 'ROUND_START') {
+      this.drawBanner(this.stateTime < 1.0 ? `ROUND ${this.round}` : 'FIGHT!', '');
+    } else if (this.state === 'ROUND_END') {
+      this.drawBanner(this.banner.main, this.banner.sub);
+    } else if (this.state === 'GAME_OVER') {
+      const w = this.wins.P1 > this.wins.P2 ? this.p1 : this.p2;
+      this.drawBanner(`${this.label(w)} 獲勝！`, '按 Enter 回到標題');
+    }
+  }
+
+  drawBanner(main, sub) {
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.textAlign = 'center';
+    ctx.font = `bold 72px ${FONT}`;
+    ctx.lineWidth = 8;
+    ctx.strokeStyle = '#000';
+    ctx.strokeText(main, this.W / 2, 270);
+    ctx.fillStyle = '#ffd166';
+    ctx.fillText(main, this.W / 2, 270);
+    if (sub) {
+      ctx.font = `bold 24px ${FONT}`;
+      ctx.lineWidth = 4;
+      ctx.strokeText(sub, this.W / 2, 320);
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText(sub, this.W / 2, 320);
+    }
+    ctx.restore();
+  }
+
+  drawTitle() {
+    const ctx = this.ctx;
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#ffd166';
+    ctx.font = `bold 64px ${FONT}`;
+    ctx.fillText('方塊鬥技場', this.W / 2, 120);
+    ctx.fillStyle = '#8fa3bf';
+    ctx.font = `20px ${FONT}`;
+    ctx.fillText('ISOMETRIC ARENA DUEL', this.W / 2, 158);
+
+    // 選項
+    const modeText = this.mode === 'single' ? '單人（P1 vs 電腦）' : '雙人（同一鍵盤）';
+    const diffText = this.difficulty === 'easy' ? '簡單' : '普通';
+    const rows = [`模式：  ${modeText}`, `難度：  ${diffText}`];
+    rows.forEach((text, i) => {
+      ctx.fillStyle = i === this.menuRow ? '#ffd166' : '#ffffff';
+      ctx.font = `bold 26px ${FONT}`;
+      ctx.fillText((i === this.menuRow ? '▶ ' : '  ') + text, this.W / 2, 250 + i * 50);
+    });
+
+    // 操作說明
+    ctx.fillStyle = '#cfd8e3';
+    ctx.font = `16px ${FONT}`;
+    const help = [
+      'P1：WASD 移動　左鍵 開槍　右鍵 近戰　Q 衝刺',
+      'P2：方向鍵移動　Numpad1 攻擊　Numpad2 能量球　Numpad3 衝刺（無數字鍵盤可改用 , . /）',
+      '↑↓ 切換選項　←→ 更改設定　Enter 開始　P / Esc 暫停',
+      '三戰兩勝，每回合 60 秒，時間到時血量較多者獲勝',
+    ];
+    help.forEach((t, i) => ctx.fillText(t, this.W / 2, 380 + i * 30));
+    ctx.textAlign = 'left';
+  }
+}
+
+// 方塊對圓形角色的碰撞：把角色推出方塊
+function resolveObstacles(f) {
+  const r = CONFIG.FIGHTER_R;
+  for (const o of OBSTACLES) {
+    const cx = clamp(f.x, o.x, o.x + 1);
+    const cy = clamp(f.y, o.y, o.y + 1);
+    const dx = f.x - cx, dy = f.y - cy;
+    const d2 = dx * dx + dy * dy;
+    if (d2 >= r * r || d2 === 0) continue;   // d2 === 0 只會在圓心進入方塊內時發生，移動分段後不會出現
+    const d = Math.sqrt(d2);
+    const push = (r - d) / d;
+    f.x += dx * push;
+    f.y += dy * push;
+  }
+}
+
+// ============================================================
+// 啟動：requestAnimationFrame + deltaTime
+// ============================================================
+const game = new Game(document.getElementById('game'));
+Input.init();
+
+let last = performance.now();
+function frame(now) {
+  const dt = clamp((now - last) / 1000, 0, 0.05);  // 限制最大 dt，避免切換分頁後跳幀
+  last = now;
+  game.update(dt);
+  game.render();
+  Input.endFrame();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
